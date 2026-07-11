@@ -1,5 +1,5 @@
 // Patch à ajouter dans ton front-end
-const AI_PLAN_API_URL = 'https://ton-repo.onrender.com/api/plan/generate';
+const AI_PLAN_API_URL = 'https://pushup-plan-api.onrender.com/api/plan/generate';
 
 async function regeneratePlanFromAI(reason='regular'){
   if(!planProfile) return null;
