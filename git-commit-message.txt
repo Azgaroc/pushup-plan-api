@@ -1,0 +1,6 @@
+Initial free adaptive push-up plan API
+
+- Add Node.js/Express backend
+- Add free model configuration
+- Add frontend integration patch
+- Add README and gitignore

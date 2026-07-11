@@ -1,0 +1,14 @@
+{
+  "name": "pushup-plan-api",
+  "version": "1.0.0",
+  "description": "Free adaptive push-up plan API",
+  "main": "pushup-backend-nodejs-free.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node pushup-backend-nodejs-free.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}
