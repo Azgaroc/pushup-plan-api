@@ -1,3 +1,4 @@
+// v46
 const express = require('express');
 const cors = require('cors');
 
@@ -27,6 +28,17 @@ function computeRatio(context) {
   return clamp(avg / Math.max(1, maxReps * 4), 0.75, 1.15);
 }
 
+// Utilise la date locale envoyée par le client si disponible et valide,
+// pour éviter un décalage d'un jour entre le fuseau du serveur et celui de l'utilisateur.
+function parseAnchorDate(context) {
+  const clientToday = context && context.today;
+  if (typeof clientToday === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(clientToday)) {
+    const d = new Date(clientToday + 'T00:00:00Z');
+    if (!isNaN(d.getTime())) return d;
+  }
+  return new Date();
+}
+
 function makeRuleBasedPlan(payload) {
   const context = payload.context || {};
   const profile = context.profile || {};
@@ -34,14 +46,21 @@ function makeRuleBasedPlan(payload) {
   const days = Array.isArray(profile.days) && profile.days.length ? profile.days : [1, 3, 5];
   const ratio = computeRatio(context);
   const reason = payload.reason || 'regular';
-  const today = new Date();
+  const today = parseAnchorDate(context);
+  const perSetCap = Math.max(2, Math.round(maxReps * 0.7));
+  const dailyTotalCap = reason === 'initial' ? Math.round(maxReps * 2.0) : Math.round(maxReps * 3.2);
   const rows = [];
   for (let i = 0; i < 5; i++) {
     const d = new Date(today);
     d.setDate(d.getDate() + i);
     const intensity = (days.indexOf(d.getDay()) + 1) || 2;
-    let sets = generateDailyTarget(maxReps, intensity, ratio);
-    if (reason === 'skipped_day' && i === 0) sets = sets.map(v => clamp(Math.round(v * 0.92), 2, 200));
+    let sets = generateDailyTarget(maxReps, intensity, ratio).map(v => clamp(v, 2, perSetCap));
+    let total = sets.reduce((a, b) => a + b, 0);
+    if (total > dailyTotalCap && total > 0) {
+      const factor = dailyTotalCap / total;
+      sets = sets.map(v => clamp(Math.round(v * factor), 2, perSetCap));
+    }
+    if (reason === 'skipped_day' && i === 0) sets = sets.map(v => clamp(Math.round(v * 0.92), 2, perSetCap));
     rows.push({
       date: d.toISOString().slice(0, 10),
       sets,
@@ -54,14 +73,23 @@ function makeRuleBasedPlan(payload) {
 
 // ---------- Validate / normalize whatever the LLM returns ----------
 
-function normalizeAndValidatePlan(raw) {
+function normalizeAndValidatePlan(raw, maxReps) {
   if (!raw || !Array.isArray(raw.days) || !raw.days.length) return null;
+  const perSetCap = Math.max(2, Math.round((Number(maxReps) || 10) * 0.7));
+  const dailyTotalCap = Math.round((Number(maxReps) || 10) * 3.2);
   const days = raw.days
     .map(d => {
       const date = String(d && d.date || '').slice(0, 10);
-      const sets = Array.isArray(d && d.sets)
-        ? d.sets.map(n => clamp(Math.round(Number(n) || 0), 2, 200)).filter(Boolean)
+      let sets = Array.isArray(d && d.sets)
+        ? d.sets.map(n => clamp(Math.round(Number(n) || 0), 2, perSetCap)).filter(Boolean)
         : [];
+      // Si le total dépasse le plafond journalier malgré le plafond par série,
+      // on réduit chaque série au prorata pour rester sous la limite absolue.
+      let total = sets.reduce((a, b) => a + b, 0);
+      if (total > dailyTotalCap && total > 0) {
+        const factor = dailyTotalCap / total;
+        sets = sets.map(v => clamp(Math.round(v * factor), 2, perSetCap));
+      }
       const restSeconds = clamp(Math.round(Number(d && d.restSeconds) || 60), 30, 300);
       const note = String((d && d.note) || '').slice(0, 200);
       return { date, sets, restSeconds, note };
@@ -89,9 +117,23 @@ function buildPrompt(payload) {
   const today = context.today || new Date().toISOString().slice(0, 10);
   const reason = payload.reason || 'regular';
 
+  // Bornes numériques explicites dérivées du max de l'utilisateur : on ne laisse
+  // pas le modèle "interpréter" ce qui est réaliste, on le lui donne en chiffres.
+  const perSetCap = Math.max(2, Math.round(maxReps * 0.7));
+  const dailyTotalCap = reason === 'initial'
+    ? Math.round(maxReps * 2.0)
+    : Math.round(maxReps * 3.2);
+
   const system = `Tu es un coach de musculation spécialisé dans les pompes. Tu génères des plans d'entraînement progressifs, sûrs et réalistes, adaptés aux performances réelles de l'utilisateur. Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou après, respectant exactement ce schéma :
 {"days":[{"date":"YYYY-MM-DD","sets":[nombre,nombre,...],"restSeconds":nombre,"note":"courte phrase d'encouragement ou conseil en français"}]}
-Règles : génère exactement 5 jours consécutifs à partir d'aujourd'hui (inclus). Chaque jour a entre 3 et 6 séries. Le nombre de répétitions par série doit rester réaliste par rapport au maximum de l'utilisateur, jamais brutal. Si l'utilisateur a sauté un entraînement récemment, réduis légèrement le volume du premier jour puis reprends une progression douce. Ne dépasse jamais une augmentation de plus de 10% de volume total d'un jour à l'autre.`;
+Règles STRICTES à respecter, non négociables :
+- Génère exactement 5 jours consécutifs à partir d'aujourd'hui (inclus).
+- Chaque jour a entre 3 et 6 séries.
+- Aucune série ne doit dépasser ${perSetCap} répétitions (soit 70% du maximum de l'utilisateur). Une série proche du maximum absolu est dangereuse et interdite.
+- Le total de répétitions sur une journée ne doit JAMAIS dépasser ${dailyTotalCap} répétitions.
+- Si l'utilisateur a sauté un entraînement récemment, réduis légèrement le volume du premier jour puis reprends une progression douce.
+- N'augmente jamais le volume total de plus de 10% d'un jour à l'autre.
+- En cas de doute, reste PRUDENT et propose moins plutôt que plus : il vaut mieux un plan trop facile qu'un plan qui blesse.`;
 
   const user = `Profil de l'utilisateur :
 - Maximum de pompes en une série : ${maxReps}
@@ -140,7 +182,8 @@ async function generatePlanWithGroq(payload) {
     const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
     if (!content) throw new Error('Groq API returned no content');
     const parsed = JSON.parse(content);
-    const plan = normalizeAndValidatePlan(parsed);
+    const maxReps = Number(payload && payload.context && payload.context.profile && payload.context.profile.maxReps) || 10;
+    const plan = normalizeAndValidatePlan(parsed, maxReps);
     if (!plan) throw new Error('Groq API returned an invalid plan shape');
     return plan;
   } finally {
