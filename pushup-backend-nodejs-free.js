@@ -1,4 +1,4 @@
-// v47
+// v48
 const express = require('express');
 const cors = require('cors');
 
@@ -19,13 +19,17 @@ function generateDailyTarget(maxReps, intensity, ratio) {
   return multipliers.map(m => clamp(Math.round(rawBase * m), 2, 200));
 }
 
-function computeRatio(context) {
+function computeRatio(context, reason) {
   const profile = context.profile || {};
   const maxReps = Number(profile.maxReps) || 10;
-  const recent = Array.isArray(context.recent) ? context.recent : [];
-  if (!recent.length) return 1;
+  // On exclut les séances signalées comme difficiles : un total élevé obtenu
+  // avec des pauses supplémentaires n'est pas un signe qu'on peut en faire plus.
+  const recent = Array.isArray(context.recent) ? context.recent.filter(w => w && w.difficulty !== 'hard') : [];
+  if (!recent.length) return reason === 'was_hard' ? 0.85 : 1;
   const avg = recent.reduce((s, w) => s + (Number(w.total) || 0), 0) / recent.length;
-  return clamp(avg / Math.max(1, maxReps * 4), 0.75, 1.15);
+  let ratio = clamp(avg / Math.max(1, maxReps * 4), 0.75, 1.15);
+  if (reason === 'was_hard') ratio = Math.min(ratio, 1.0);
+  return ratio;
 }
 
 // Utilise la date locale envoyée par le client si disponible et valide,
@@ -44,8 +48,8 @@ function makeRuleBasedPlan(payload) {
   const profile = context.profile || {};
   const maxReps = Number(profile.maxReps) || 10;
   const days = Array.isArray(profile.days) && profile.days.length ? profile.days : [1, 3, 5];
-  const ratio = computeRatio(context);
   const reason = payload.reason || 'regular';
+  const ratio = computeRatio(context, reason);
   const today = parseAnchorDate(context);
   const perSetCap = Math.max(2, Math.round(maxReps * 0.7));
   const dailyTotalCap = (reason === 'initial' || reason === 'was_hard') ? Math.round(maxReps * 2.0) : Math.round(maxReps * 3.2);
@@ -114,7 +118,7 @@ function buildPrompt(payload) {
     : 'non précisé';
   const recent = Array.isArray(context.recent) ? context.recent.slice(0, 14) : [];
   const recentSummary = recent.length
-    ? recent.map(w => `${w.isoDate || w.date || '?'}: ${w.total || 0} pompes`).join(' | ')
+    ? recent.map(w => `${w.isoDate || w.date || '?'}: ${w.total || 0} pompes${w.difficulty === 'hard' ? ' (signalée difficile, ne pas compter comme preuve de capacité accrue)' : ''}`).join(' | ')
     : 'aucune séance récente enregistrée';
   const skippedCount = Array.isArray(context.skipped) ? context.skipped.length : 0;
   const recentHardCount = Array.isArray(context.recentHard) ? context.recentHard.length : 0;
