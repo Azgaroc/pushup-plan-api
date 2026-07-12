@@ -1,4 +1,4 @@
-// v46
+// v47
 const express = require('express');
 const cors = require('cors');
 
@@ -48,7 +48,7 @@ function makeRuleBasedPlan(payload) {
   const reason = payload.reason || 'regular';
   const today = parseAnchorDate(context);
   const perSetCap = Math.max(2, Math.round(maxReps * 0.7));
-  const dailyTotalCap = reason === 'initial' ? Math.round(maxReps * 2.0) : Math.round(maxReps * 3.2);
+  const dailyTotalCap = (reason === 'initial' || reason === 'was_hard') ? Math.round(maxReps * 2.0) : Math.round(maxReps * 3.2);
   const rows = [];
   for (let i = 0; i < 5; i++) {
     const d = new Date(today);
@@ -61,11 +61,14 @@ function makeRuleBasedPlan(payload) {
       sets = sets.map(v => clamp(Math.round(v * factor), 2, perSetCap));
     }
     if (reason === 'skipped_day' && i === 0) sets = sets.map(v => clamp(Math.round(v * 0.92), 2, perSetCap));
+    if (reason === 'was_hard') sets = sets.map(v => clamp(Math.round(v * 0.85), 2, perSetCap));
     rows.push({
       date: d.toISOString().slice(0, 10),
       sets,
       restSeconds: sets.length >= 6 ? 75 : sets.length >= 5 ? 60 : 90,
-      note: reason === 'skipped_day' && i === 0 ? 'Volume réduit après jour sauté' : 'Adaptation progressive'
+      note: reason === 'skipped_day' && i === 0 ? 'Volume réduit après jour sauté'
+        : reason === 'was_hard' ? 'Volume réduit après une séance difficile'
+        : 'Adaptation progressive'
     });
   }
   return { version: 1, generatedAt: new Date().toISOString(), days: rows, source: 'rule-based' };
@@ -114,13 +117,14 @@ function buildPrompt(payload) {
     ? recent.map(w => `${w.isoDate || w.date || '?'}: ${w.total || 0} pompes`).join(' | ')
     : 'aucune séance récente enregistrée';
   const skippedCount = Array.isArray(context.skipped) ? context.skipped.length : 0;
+  const recentHardCount = Array.isArray(context.recentHard) ? context.recentHard.length : 0;
   const today = context.today || new Date().toISOString().slice(0, 10);
   const reason = payload.reason || 'regular';
 
   // Bornes numériques explicites dérivées du max de l'utilisateur : on ne laisse
   // pas le modèle "interpréter" ce qui est réaliste, on le lui donne en chiffres.
   const perSetCap = Math.max(2, Math.round(maxReps * 0.7));
-  const dailyTotalCap = reason === 'initial'
+  const dailyTotalCap = (reason === 'initial' || reason === 'was_hard')
     ? Math.round(maxReps * 2.0)
     : Math.round(maxReps * 3.2);
 
@@ -132,6 +136,7 @@ Règles STRICTES à respecter, non négociables :
 - Aucune série ne doit dépasser ${perSetCap} répétitions (soit 70% du maximum de l'utilisateur). Une série proche du maximum absolu est dangereuse et interdite.
 - Le total de répétitions sur une journée ne doit JAMAIS dépasser ${dailyTotalCap} répétitions.
 - Si l'utilisateur a sauté un entraînement récemment, réduis légèrement le volume du premier jour puis reprends une progression douce.
+- Si l'utilisateur a signalé qu'une séance récente était difficile (pauses supplémentaires nécessaires), réduis le volume de TOUS les jours de ce plan d'environ 15%, pas seulement le premier jour : c'est un signal que le calibrage actuel est trop dur, pas un incident isolé.
 - N'augmente jamais le volume total de plus de 10% d'un jour à l'autre.
 - En cas de doute, reste PRUDENT et propose moins plutôt que plus : il vaut mieux un plan trop facile qu'un plan qui blesse.`;
 
@@ -142,6 +147,7 @@ Règles STRICTES à respecter, non négociables :
 - Raison de la génération : ${reason}
 - Séances des 14 derniers jours : ${recentSummary}
 - Nombre de jours sautés récemment (7 derniers jours) : ${skippedCount}
+- Nombre de séances récentes signalées comme difficiles (7 derniers jours) : ${recentHardCount}
 
 Génère le plan des 5 prochains jours en JSON uniquement, selon le schéma donné.`;
 
