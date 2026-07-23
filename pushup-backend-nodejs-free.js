@@ -1,10 +1,14 @@
-// v48
+// v49
 const express = require('express');
 const cors = require('cors');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+const notifications = require('./notifications-server-addon');
+app.use(notifications.router);
+notifications.startScheduler();
 
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
