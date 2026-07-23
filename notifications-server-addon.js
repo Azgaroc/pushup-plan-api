@@ -110,45 +110,82 @@ const MESSAGES = {
 function startScheduler() {
   cron.schedule('* * * * *', async () => {
     const store = loadStore();
-    const todayKey = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC), sert juste à éviter les doublons
     let changed = false;
 
     for (const [endpoint, entry] of Object.entries(store)) {
       try {
         const now = new Date();
+
         const localTimeStr = now.toLocaleTimeString('fr-FR', {
-          timeZone: entry.timezone,
+          timeZone: entry.timezone || 'UTC',
           hour: '2-digit',
           minute: '2-digit',
           hour12: false
-        }); // "HH:MM"
-        const localDow = Number(
-          new Intl.DateTimeFormat('en-US', { timeZone: entry.timezone, weekday: 'numeric' }).format(now)
-        ) % 7; // 0=dimanche ... 6=samedi, comme JS Date.getDay()
+        });
 
-        const isTrainingDay = entry.days.includes(localDow);
+        const localDateKey = new Intl.DateTimeFormat('en-CA', {
+          timeZone: entry.timezone || 'UTC',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit'
+        }).format(now);
+
+        const weekdayName = new Intl.DateTimeFormat('en-US', {
+          timeZone: entry.timezone || 'UTC',
+          weekday: 'short'
+        }).format(now);
+
+        const weekdays = {
+          Sun: 0,
+          Mon: 1,
+          Tue: 2,
+          Wed: 3,
+          Thu: 4,
+          Fri: 5,
+          Sat: 6
+        };
+
+        const localDow = weekdays[weekdayName];
+
+        const isTrainingDay =
+          Array.isArray(entry.days) && entry.days.includes(localDow);
+
         const isTime = localTimeStr === entry.time;
-        const alreadySentToday = entry.lastSentDate === todayKey;
+        const alreadySentToday = entry.lastSentDate === localDateKey;
 
         if (isTrainingDay && isTime && !alreadySentToday) {
           const msg = MESSAGES[entry.lang] || MESSAGES.fr;
-          await webpush.sendNotification(entry.subscription, JSON.stringify(msg));
-          entry.lastSentDate = todayKey;
+
+          await webpush.sendNotification(
+            entry.subscription,
+            JSON.stringify({
+              ...msg,
+              url: 'https://azgaroc.github.io/Push-up/'
+            })
+          );
+
+          entry.lastSentDate = localDateKey;
           changed = true;
+
+          console.log(
+            `[notifications] Push envoyée : ${entry.time} (${entry.timezone})`
+          );
         }
       } catch (err) {
-        // Abonnement expiré ou invalide -> on le supprime
         if (err.statusCode === 404 || err.statusCode === 410) {
           delete store[endpoint];
           changed = true;
+          console.log('[notifications] Abonnement expiré supprimé.');
         } else {
           console.error('[notifications] Erreur envoi push:', err.message);
         }
       }
     }
 
-    if (changed) saveStore(store);
+    if (changed) {
+      saveStore(store);
+    }
   });
-}
 
-module.exports = { router, startScheduler };
+  console.log('[notifications] Planificateur démarré : vérification chaque minute.');
+}
