@@ -189,3 +189,5 @@ function startScheduler() {
 
   console.log('[notifications] Planificateur démarré : vérification chaque minute.');
 }
+
+module.exports = { router, startScheduler };
