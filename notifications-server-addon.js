@@ -155,6 +155,10 @@ router.get('/api/notifications/debug-status', (req, res) => {
   const webPushStore = loadStore();
   const fcmStore = loadFcmStore();
   res.json({
+    serverTimeIso: new Date().toISOString(),
+    serverTimeParis: new Date().toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit', hour12: false }),
+    processUptimeSeconds: Math.round(process.uptime()),
+    lastCronTickIso,
     vapidConfigured: !!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY),
     fcmReady,
     webPushSubscriptionsCount: Object.keys(webPushStore).length,
@@ -188,8 +192,11 @@ function isDueNow(entry, now) {
 // Vérifie chaque minute, sur les deux canaux, si un abonné doit recevoir sa
 // notification : jour de la semaine (dans son fuseau horaire) présent dans
 // ses jours d'entraînement, ET heure locale correspondant à l'heure choisie.
+let lastCronTickIso = null;
+
 function startScheduler() {
   cron.schedule('* * * * *', async () => {
+    lastCronTickIso = new Date().toISOString();
     const todayKey = new Date().toISOString().slice(0, 10); // sert à éviter les doublons
     const now = new Date();
 
