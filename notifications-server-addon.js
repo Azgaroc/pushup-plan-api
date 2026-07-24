@@ -148,6 +148,22 @@ router.post('/api/notifications/unsubscribe-fcm', (req, res) => {
   res.json({ ok: true });
 });
 
+// --- Diagnostic (temporaire) --------------------------------------------------
+// Ouvre https://<ton-serveur>/api/notifications/debug-status dans un navigateur
+// pour vérifier rapidement l'état du serveur, sans avoir besoin des logs Render.
+router.get('/api/notifications/debug-status', (req, res) => {
+  const webPushStore = loadStore();
+  const fcmStore = loadFcmStore();
+  res.json({
+    vapidConfigured: !!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY),
+    fcmReady,
+    webPushSubscriptionsCount: Object.keys(webPushStore).length,
+    fcmTokensCount: Object.keys(fcmStore).length,
+    fcmEntries: Object.values(fcmStore).map(e => ({ time: e.time, timezone: e.timezone, days: e.days, lang: e.lang, lastSentDate: e.lastSentDate })),
+    webPushEntries: Object.values(webPushStore).map(e => ({ time: e.time, timezone: e.timezone, days: e.days, lang: e.lang, lastSentDate: e.lastSentDate }))
+  });
+});
+
 // --- Contenu de la notification (par langue) --------------------------------
 const MESSAGES = {
   fr: { title: 'Push-Up', body: "C'est ton jour d'entraînement ! Prêt pour ta séance ?" },
