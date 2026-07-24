@@ -175,6 +175,8 @@ const MESSAGES = {
   es: { title: 'Push-Up', body: '¡Hoy toca entrenar! ¿Listo para tu sesión?' }
 };
 
+const WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
 function isDueNow(entry, now) {
   const localTimeStr = now.toLocaleTimeString('fr-FR', {
     timeZone: entry.timezone,
@@ -182,9 +184,8 @@ function isDueNow(entry, now) {
     minute: '2-digit',
     hour12: false
   }); // "HH:MM"
-  const localDow = Number(
-    new Intl.DateTimeFormat('en-US', { timeZone: entry.timezone, weekday: 'numeric' }).format(now)
-  ) % 7; // 0=dimanche ... 6=samedi, comme JS Date.getDay()
+  const shortName = new Intl.DateTimeFormat('en-US', { timeZone: entry.timezone, weekday: 'short' }).format(now); // "Mon", "Tue", ...
+  const localDow = WEEKDAY_INDEX[shortName]; // 0=dimanche ... 6=samedi, comme JS Date.getDay()
   return entry.days.includes(localDow) && localTimeStr === entry.time;
 }
 
