@@ -1,4 +1,4 @@
-// v49
+// v50
 const express = require('express');
 const cors = require('cors');
 
@@ -24,16 +24,22 @@ function generateDailyTarget(maxReps, intensity, ratio) {
 }
 
 function computeRatio(context, reason) {
-  const profile = context.profile || {};
-  const maxReps = Number(profile.maxReps) || 10;
-  // On exclut les séances signalées comme difficiles : un total élevé obtenu
-  // avec des pauses supplémentaires n'est pas un signe qu'on peut en faire plus.
+  if (reason === 'was_hard') return 0.85;
+  if (reason === 'skipped_day') return 0.95;
+
   const recent = Array.isArray(context.recent) ? context.recent.filter(w => w && w.difficulty !== 'hard') : [];
-  if (!recent.length) return reason === 'was_hard' ? 0.85 : 1;
-  const avg = recent.reduce((s, w) => s + (Number(w.total) || 0), 0) / recent.length;
-  let ratio = clamp(avg / Math.max(1, maxReps * 4), 0.75, 1.15);
-  if (reason === 'was_hard') ratio = Math.min(ratio, 1.0);
-  return ratio;
+  const recentHardCount = Array.isArray(context.recentHard) ? context.recentHard.length : 0;
+
+  // Pas d'historique exploitable : base neutre, ni pénalité ni bonus.
+  if (!recent.length) return 1;
+
+  // Progression douce et régulière tant qu'aucune séance récente n'a été
+  // signalée difficile : chaque séance complétée sans incident pousse
+  // légèrement le volume vers le haut, au lieu d'être comparée à une
+  // estimation arbitraire du volume "attendu" qui n'a souvent aucun rapport
+  // avec ce qu'un utilisateur fait réellement.
+  const growth = recentHardCount > 0 ? 0 : Math.min(0.20, recent.length * 0.015);
+  return clamp(1 + growth, 0.85, 1.20);
 }
 
 // Utilise la date locale envoyée par le client si disponible et valide,
@@ -56,7 +62,7 @@ function makeRuleBasedPlan(payload) {
   const ratio = computeRatio(context, reason);
   const today = parseAnchorDate(context);
   const perSetCap = Math.max(2, Math.round(maxReps * 0.7));
-  const dailyTotalCap = (reason === 'initial' || reason === 'was_hard') ? Math.round(maxReps * 2.0) : Math.round(maxReps * 3.2);
+  const dailyTotalCap = (reason === 'initial' || reason === 'was_hard') ? Math.round(maxReps * 2.0) : Math.round(maxReps * 3.6);
   const rows = [];
   for (let i = 0; i < 5; i++) {
     const d = new Date(today);
@@ -87,7 +93,7 @@ function makeRuleBasedPlan(payload) {
 function normalizeAndValidatePlan(raw, maxReps) {
   if (!raw || !Array.isArray(raw.days) || !raw.days.length) return null;
   const perSetCap = Math.max(2, Math.round((Number(maxReps) || 10) * 0.7));
-  const dailyTotalCap = Math.round((Number(maxReps) || 10) * 3.2);
+  const dailyTotalCap = Math.round((Number(maxReps) || 10) * 3.6);
   const days = raw.days
     .map(d => {
       const date = String(d && d.date || '').slice(0, 10);
@@ -134,7 +140,7 @@ function buildPrompt(payload) {
   const perSetCap = Math.max(2, Math.round(maxReps * 0.7));
   const dailyTotalCap = (reason === 'initial' || reason === 'was_hard')
     ? Math.round(maxReps * 2.0)
-    : Math.round(maxReps * 3.2);
+    : Math.round(maxReps * 3.6);
 
   const system = `Tu es un coach de musculation spécialisé dans les pompes. Tu génères des plans d'entraînement progressifs, sûrs et réalistes, adaptés aux performances réelles de l'utilisateur. Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou après, respectant exactement ce schéma :
 {"days":[{"date":"YYYY-MM-DD","sets":[nombre,nombre,...],"restSeconds":nombre,"note":"courte phrase d'encouragement ou conseil en français"}]}
@@ -143,10 +149,11 @@ Règles STRICTES à respecter, non négociables :
 - Chaque jour a entre 3 et 6 séries.
 - Aucune série ne doit dépasser ${perSetCap} répétitions (soit 70% du maximum de l'utilisateur). Une série proche du maximum absolu est dangereuse et interdite.
 - Le total de répétitions sur une journée ne doit JAMAIS dépasser ${dailyTotalCap} répétitions.
+- Si les séances récentes (14 derniers jours) ne montrent AUCUNE séance difficile et un bon taux de complétion (peu ou pas de jours sautés), AUGMENTE le volume total de façon régulière d'un plan à l'autre, en te rapprochant progressivement de ${dailyTotalCap} répétitions par jour : un plan qui reste identique ou presque d'une semaine à l'autre alors que tout se passe bien est un échec de progression, pas de la prudence.
 - Si l'utilisateur a sauté un entraînement récemment, réduis légèrement le volume du premier jour puis reprends une progression douce.
 - Si l'utilisateur a signalé qu'une séance récente était difficile (pauses supplémentaires nécessaires), réduis le volume de TOUS les jours de ce plan d'environ 15%, pas seulement le premier jour : c'est un signal que le calibrage actuel est trop dur, pas un incident isolé.
 - N'augmente jamais le volume total de plus de 10% d'un jour à l'autre.
-- En cas de doute, reste PRUDENT et propose moins plutôt que plus : il vaut mieux un plan trop facile qu'un plan qui blesse.`;
+- La prudence s'applique uniquement quand un signal réel de difficulté existe (séance difficile, jours sautés) : en l'absence d'un tel signal, ne stagne pas par précaution, progresse.`;
 
   const user = `Profil de l'utilisateur :
 - Maximum de pompes en une série : ${maxReps}
