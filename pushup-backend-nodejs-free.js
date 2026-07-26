@@ -1,4 +1,4 @@
-// v52
+// v53
 const express = require('express');
 const cors = require('cors');
 
@@ -67,10 +67,26 @@ function makeRuleBasedPlan(payload) {
   const today = parseAnchorDate(context);
   const perSetCap = Math.max(2, Math.round(maxReps * 0.7));
   const dailyTotalCap = (reason === 'initial' || reason === 'was_hard') ? Math.round(maxReps * 2.0) : Math.round(maxReps * 3.6);
+  const recentHardCount = Array.isArray(context.recentHard) ? context.recentHard.length : 0;
+  const trainingDaysPerWeek = Array.isArray(profile.days) ? profile.days.length : 0;
+  // Repos imposé indépendamment des jours choisis par l'utilisateur : seulement
+  // si le rythme est très soutenu (6-7 jours/semaine) ET qu'il y a un vrai signal
+  // de fatigue récente (séance difficile). Placé au 3ème jour du plan pour éviter
+  // qu'il tombe pile aujourd'hui ou s'enchaîne avec un autre repos.
+  const forcedRestDayIndex = (trainingDaysPerWeek >= 6 && recentHardCount >= 1 && reason !== 'initial') ? 2 : -1;
   const rows = [];
   for (let i = 0; i < 5; i++) {
     const d = new Date(today);
     d.setDate(d.getDate() + i);
+    if (i === forcedRestDayIndex) {
+      rows.push({
+        date: d.toISOString().slice(0, 10),
+        sets: [],
+        restSeconds: 0,
+        note: 'Jour de repos imposé par ton coach : rythme soutenu et signes de fatigue récents.'
+      });
+      continue;
+    }
     let sets = generateDailyTarget(maxReps, i, ratio).map(v => clamp(v, 2, perSetCap));
     let total = sets.reduce((a, b) => a + b, 0);
     if (total > dailyTotalCap && total > 0) {
@@ -114,7 +130,7 @@ function normalizeAndValidatePlan(raw, maxReps) {
       const note = String((d && d.note) || '').slice(0, 200);
       return { date, sets, restSeconds, note };
     })
-    .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d.date) && d.sets.length >= 2 && d.sets.length <= 8);
+    .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d.date) && (d.sets.length === 0 || (d.sets.length >= 2 && d.sets.length <= 8)));
   if (!days.length) return null;
 
   // Filet de sécurité : même si l'IA ne respecte pas parfaitement la consigne,
@@ -162,25 +178,28 @@ function buildPrompt(payload) {
     ? Math.round(maxReps * 2.0)
     : Math.round(maxReps * 3.6);
 
-  const system = `Tu es un coach de musculation spécialisé dans les pompes. Tu génères des plans d'entraînement progressifs, sûrs et réalistes, adaptés aux performances réelles de l'utilisateur. Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou après, respectant exactement ce schéma :
+  const system = `Tu es un coach sportif spécialisé dans les pompes. Tu génères des plans d'entraînement progressifs, sûrs et réalistes, adaptés aux performances réelles de l'utilisateur. Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou après, respectant exactement ce schéma :
 {"days":[{"date":"YYYY-MM-DD","sets":[nombre,nombre,...],"restSeconds":nombre,"note":"courte phrase d'encouragement ou conseil en français"}]}
+Un jour peut être un jour de repos IMPOSÉ par toi : dans ce cas, mets "sets":[] (tableau vide) et explique brièvement pourquoi dans "note". C'est la seule façon de marquer un repos obligatoire.
 Règles STRICTES à respecter, non négociables :
 - Génère exactement 5 jours consécutifs à partir d'aujourd'hui (inclus).
-- Chaque jour a entre 3 et 6 séries.
+- Pour un jour d'entraînement (pas un repos imposé), chaque jour a entre 3 et 6 séries.
 - Aucune série ne doit dépasser ${perSetCap} répétitions (soit 70% du maximum de l'utilisateur). Une série proche du maximum absolu est dangereuse et interdite.
 - Le total de répétitions sur une journée ne doit JAMAIS dépasser ${dailyTotalCap} répétitions.
 - Si les séances récentes (14 derniers jours) ne montrent AUCUNE séance difficile et un bon taux de complétion (peu ou pas de jours sautés), AUGMENTE le volume total de façon régulière d'un plan à l'autre, en te rapprochant progressivement de ${dailyTotalCap} répétitions par jour : un plan qui reste identique ou presque d'une semaine à l'autre alors que tout se passe bien est un échec de progression, pas de la prudence.
 - Si l'utilisateur a sauté un entraînement récemment, réduis légèrement le volume du premier jour puis reprends une progression douce.
 - Si l'utilisateur a signalé qu'une séance récente était difficile (pauses supplémentaires nécessaires), réduis le volume de TOUS les jours de ce plan d'environ 15%, pas seulement le premier jour : c'est un signal que le calibrage actuel est trop dur, pas un incident isolé.
 - Si la raison de génération est "was_easy" (l'utilisateur a explicitement signalé que la dernière séance était trop facile), augmente le volume total de façon nette (environ +15% par rapport au dernier plan), dans la limite des plafonds de sécurité ci-dessus : c'est un signal explicite qu'il faut plus de challenge, à traiter différemment d'une progression douce habituelle.
-- N'augmente jamais le volume total de plus de 10% d'un jour à l'autre, ET ne le réduis jamais de plus de 10% d'un jour à l'autre (sauf jour sauté ou séance difficile signalée) : les 5 jours du plan doivent former une progression lisse et cohérente, jamais une suite qui monte puis retombe brutalement.
-- La prudence s'applique uniquement quand un signal réel de difficulté existe (séance difficile, jours sautés) : en l'absence d'un tel signal, ne stagne pas par précaution, progresse.`;
+- N'augmente jamais le volume total de plus de 10% d'un jour à l'autre, ET ne le réduis jamais de plus de 10% d'un jour à l'autre (sauf jour sauté, séance difficile signalée, ou jour de repos imposé) : les 5 jours du plan doivent former une progression lisse et cohérente, jamais une suite qui monte puis retombe brutalement.
+- La prudence s'applique uniquement quand un signal réel de difficulté existe (séance difficile, jours sautés) : en l'absence d'un tel signal, ne stagne pas par précaution, progresse.
+- Jours de repos imposés (indépendamment des jours d'entraînement choisis par l'utilisateur) : c'est TOI qui décides, en te basant sur l'historique réel, pas sur un calendrier fixe. Si l'utilisateur s'entraîne 6 ou 7 jours par semaine ET qu'il y a eu au moins une séance difficile récente, ou si le rythme montre des signes de fatigue accumulée, impose un jour de repos dans les 5 jours du plan (typiquement 1, rarement plus). Si au contraire tout se passe bien (peu ou pas de séances difficiles, bon taux de complétion), n'impose AUCUN repos supplémentaire même si l'utilisateur s'entraîne tous les jours : ce n'est pas nécessaire s'il n'y a aucun signal réel de fatigue. Ne mets jamais deux jours de repos imposés consécutifs.`;
 
   const user = `Profil de l'utilisateur :
 - Maximum de pompes en une série : ${maxReps}
 - Jours d'entraînement habituels : ${trainingDays}
 - Date du jour : ${today}
 - Raison de la génération : ${reason}
+- Nombre de jours d'entraînement choisis par semaine : ${Array.isArray(profile.days) ? profile.days.length : 'non précisé'}
 - Séances des 14 derniers jours : ${recentSummary}
 - Nombre de jours sautés récemment (7 derniers jours) : ${skippedCount}
 - Nombre de séances récentes signalées comme difficiles (7 derniers jours) : ${recentHardCount}
