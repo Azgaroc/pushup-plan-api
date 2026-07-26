@@ -1,4 +1,4 @@
-// v51
+// v52
 const express = require('express');
 const cors = require('cors');
 
@@ -30,6 +30,7 @@ function generateDailyTarget(maxReps, dayIndexInPlan, ratio) {
 function computeRatio(context, reason) {
   if (reason === 'was_hard') return 0.85;
   if (reason === 'skipped_day') return 0.95;
+  if (reason === 'was_easy') return 1.15; // signal explicite : augmentation nette, pas juste la progression douce habituelle
 
   const recent = Array.isArray(context.recent) ? context.recent.filter(w => w && w.difficulty !== 'hard') : [];
   const recentHardCount = Array.isArray(context.recentHard) ? context.recentHard.length : 0;
@@ -171,6 +172,7 @@ Règles STRICTES à respecter, non négociables :
 - Si les séances récentes (14 derniers jours) ne montrent AUCUNE séance difficile et un bon taux de complétion (peu ou pas de jours sautés), AUGMENTE le volume total de façon régulière d'un plan à l'autre, en te rapprochant progressivement de ${dailyTotalCap} répétitions par jour : un plan qui reste identique ou presque d'une semaine à l'autre alors que tout se passe bien est un échec de progression, pas de la prudence.
 - Si l'utilisateur a sauté un entraînement récemment, réduis légèrement le volume du premier jour puis reprends une progression douce.
 - Si l'utilisateur a signalé qu'une séance récente était difficile (pauses supplémentaires nécessaires), réduis le volume de TOUS les jours de ce plan d'environ 15%, pas seulement le premier jour : c'est un signal que le calibrage actuel est trop dur, pas un incident isolé.
+- Si la raison de génération est "was_easy" (l'utilisateur a explicitement signalé que la dernière séance était trop facile), augmente le volume total de façon nette (environ +15% par rapport au dernier plan), dans la limite des plafonds de sécurité ci-dessus : c'est un signal explicite qu'il faut plus de challenge, à traiter différemment d'une progression douce habituelle.
 - N'augmente jamais le volume total de plus de 10% d'un jour à l'autre, ET ne le réduis jamais de plus de 10% d'un jour à l'autre (sauf jour sauté ou séance difficile signalée) : les 5 jours du plan doivent former une progression lisse et cohérente, jamais une suite qui monte puis retombe brutalement.
 - La prudence s'applique uniquement quand un signal réel de difficulté existe (séance difficile, jours sautés) : en l'absence d'un tel signal, ne stagne pas par précaution, progresse.`;
 
