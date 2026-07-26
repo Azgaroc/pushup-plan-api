@@ -1,4 +1,4 @@
-// v50
+// v51
 const express = require('express');
 const cors = require('cors');
 
@@ -16,8 +16,12 @@ function clamp(n, min, max) {
 
 // ---------- Fallback: deterministic rule-based plan (used if the LLM call fails) ----------
 
-function generateDailyTarget(maxReps, intensity, ratio) {
-  const rawBase = Math.max(3, Math.round(maxReps * (0.56 + intensity * 0.06) * ratio));
+function generateDailyTarget(maxReps, dayIndexInPlan, ratio) {
+  // Légère rampe à l'intérieur des 5 jours du plan (0 à 4), au lieu de dépendre
+  // de la position du jour dans la semaine — ça évite les dents de scie qui
+  // remontent puis retombent brutalement d'une semaine à l'autre.
+  const rampFactor = 0.68 + clamp(dayIndexInPlan, 0, 4) * 0.015;
+  const rawBase = Math.max(3, Math.round(maxReps * rampFactor * ratio));
   const setCount = ratio < 0.82 ? 4 : ratio < 1.02 ? 5 : 6;
   const multipliers = setCount === 4 ? [0.95, 1.0, 0.95, 0.85] : setCount === 5 ? [0.9, 1.0, 0.95, 0.9, 0.8] : [0.85, 0.95, 1.0, 0.95, 0.9, 0.8];
   return multipliers.map(m => clamp(Math.round(rawBase * m), 2, 200));
@@ -57,7 +61,6 @@ function makeRuleBasedPlan(payload) {
   const context = payload.context || {};
   const profile = context.profile || {};
   const maxReps = Number(profile.maxReps) || 10;
-  const days = Array.isArray(profile.days) && profile.days.length ? profile.days : [1, 3, 5];
   const reason = payload.reason || 'regular';
   const ratio = computeRatio(context, reason);
   const today = parseAnchorDate(context);
@@ -67,8 +70,7 @@ function makeRuleBasedPlan(payload) {
   for (let i = 0; i < 5; i++) {
     const d = new Date(today);
     d.setDate(d.getDate() + i);
-    const intensity = (days.indexOf(d.getDay()) + 1) || 2;
-    let sets = generateDailyTarget(maxReps, intensity, ratio).map(v => clamp(v, 2, perSetCap));
+    let sets = generateDailyTarget(maxReps, i, ratio).map(v => clamp(v, 2, perSetCap));
     let total = sets.reduce((a, b) => a + b, 0);
     if (total > dailyTotalCap && total > 0) {
       const factor = dailyTotalCap / total;
@@ -113,6 +115,23 @@ function normalizeAndValidatePlan(raw, maxReps) {
     })
     .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d.date) && d.sets.length >= 2 && d.sets.length <= 8);
   if (!days.length) return null;
+
+  // Filet de sécurité : même si l'IA ne respecte pas parfaitement la consigne,
+  // on lisse ici toute variation de plus de 10% (hausse ou baisse) d'un jour
+  // au suivant, pour garantir une progression cohérente sur les 5 jours.
+  for (let i = 1; i < days.length; i++) {
+    const prevTotal = days[i - 1].sets.reduce((a, b) => a + b, 0);
+    const total = days[i].sets.reduce((a, b) => a + b, 0);
+    if (prevTotal <= 0 || total <= 0) continue;
+    const minAllowed = prevTotal * 0.9;
+    const maxAllowed = prevTotal * 1.1;
+    if (total < minAllowed || total > maxAllowed) {
+      const target = clamp(total, minAllowed, maxAllowed);
+      const factor = target / total;
+      days[i].sets = days[i].sets.map(v => clamp(Math.round(v * factor), 2, perSetCap));
+    }
+  }
+
   return { version: 1, generatedAt: new Date().toISOString(), days, source: 'groq' };
 }
 
@@ -152,7 +171,7 @@ Règles STRICTES à respecter, non négociables :
 - Si les séances récentes (14 derniers jours) ne montrent AUCUNE séance difficile et un bon taux de complétion (peu ou pas de jours sautés), AUGMENTE le volume total de façon régulière d'un plan à l'autre, en te rapprochant progressivement de ${dailyTotalCap} répétitions par jour : un plan qui reste identique ou presque d'une semaine à l'autre alors que tout se passe bien est un échec de progression, pas de la prudence.
 - Si l'utilisateur a sauté un entraînement récemment, réduis légèrement le volume du premier jour puis reprends une progression douce.
 - Si l'utilisateur a signalé qu'une séance récente était difficile (pauses supplémentaires nécessaires), réduis le volume de TOUS les jours de ce plan d'environ 15%, pas seulement le premier jour : c'est un signal que le calibrage actuel est trop dur, pas un incident isolé.
-- N'augmente jamais le volume total de plus de 10% d'un jour à l'autre.
+- N'augmente jamais le volume total de plus de 10% d'un jour à l'autre, ET ne le réduis jamais de plus de 10% d'un jour à l'autre (sauf jour sauté ou séance difficile signalée) : les 5 jours du plan doivent former une progression lisse et cohérente, jamais une suite qui monte puis retombe brutalement.
 - La prudence s'applique uniquement quand un signal réel de difficulté existe (séance difficile, jours sautés) : en l'absence d'un tel signal, ne stagne pas par précaution, progresse.`;
 
   const user = `Profil de l'utilisateur :
