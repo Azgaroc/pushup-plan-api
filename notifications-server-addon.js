@@ -169,13 +169,26 @@ function isDueNow(entry, now) {
   return entry.days.includes(localDow) && localTimeStr === entry.time;
 }
 
+// BUGFIX : la clé anti-doublon utilisait la date UTC du serveur alors que
+// l'heure de déclenchement (isDueNow) se base sur le fuseau de l'abonné.
+// Autour de minuit UTC, un abonné dans un fuseau différent (ex: France)
+// pouvait recevoir deux notifications le même jour local, ou aucune, selon
+// le sens du décalage. On calcule maintenant la date "du jour" dans le
+// fuseau de l'abonné, comme pour le reste de la logique de planification.
+function localDateKey(timezone, now) {
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now); // "YYYY-MM-DD"
+  } catch (e) {
+    return now.toISOString().slice(0, 10);
+  }
+}
+
 // --- Tâche planifiée --------------------------------------------------------
 // Vérifie chaque minute, sur les deux canaux, si un abonné doit recevoir sa
 // notification : jour de la semaine (dans son fuseau horaire) présent dans
 // ses jours d'entraînement, ET heure locale correspondant à l'heure choisie.
 function startScheduler() {
   cron.schedule('* * * * *', async () => {
-    const todayKey = new Date().toISOString().slice(0, 10); // sert à éviter les doublons
     const now = new Date();
 
     // Canal navigateur (Web Push)
@@ -183,6 +196,7 @@ function startScheduler() {
     let storeChanged = false;
     for (const [endpoint, entry] of Object.entries(store)) {
       try {
+        const todayKey = localDateKey(entry.timezone, now);
         const alreadySentToday = entry.lastSentDate === todayKey;
         if (isDueNow(entry, now) && !alreadySentToday) {
           const msg = MESSAGES[entry.lang] || MESSAGES.fr;
@@ -207,6 +221,7 @@ function startScheduler() {
       let fcmChanged = false;
       for (const [token, entry] of Object.entries(fcmStore)) {
         try {
+          const todayKey = localDateKey(entry.timezone, now);
           const alreadySentToday = entry.lastSentDate === todayKey;
           if (isDueNow(entry, now) && !alreadySentToday) {
             const msg = MESSAGES[entry.lang] || MESSAGES.fr;
