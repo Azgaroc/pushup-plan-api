@@ -173,10 +173,19 @@ function fixUnevenDistribution(sets, perSetCap) {
   return redistributeEvenly(sets, perSetCap);
 }
 
-function normalizeAndValidatePlan(raw, maxReps) {
+function normalizeAndValidatePlan(raw, maxReps, reason) {
   if (!raw || !Array.isArray(raw.days) || !raw.days.length) return null;
   const perSetCap = Math.max(2, Math.round((Number(maxReps) || 10) * 0.7));
-  const dailyTotalCap = Math.round((Number(maxReps) || 10) * 3.6);
+  // BUGFIX : ce filet de sécurité utilisait toujours le plafond large (3.6x),
+  // même pour les raisons "initial"/"was_hard" où le prompt demande au modèle
+  // de respecter un plafond réduit (2.0x). Si jamais le modèle ne respectait pas
+  // parfaitement cette consigne réduite, rien ici ne la faisait appliquer : la
+  // validation laissait passer un volume bien plus élevé que ce que la
+  // situation justifiait. Le plafond de secours doit toujours être IDENTIQUE à
+  // celui donné au modèle dans buildPrompt(), sinon il ne protège pas grand-chose.
+  const dailyTotalCap = (reason === 'initial' || reason === 'was_hard')
+    ? Math.round((Number(maxReps) || 10) * 2.0)
+    : Math.round((Number(maxReps) || 10) * 3.6);
   const days = raw.days
     .map(d => {
       const date = String(d && d.date || '').slice(0, 10);
@@ -315,7 +324,7 @@ async function generatePlanWithGroq(payload) {
     if (!content) throw new Error('Groq API returned no content');
     const parsed = JSON.parse(content);
     const maxReps = Number(payload && payload.context && payload.context.profile && payload.context.profile.maxReps) || 10;
-    const plan = normalizeAndValidatePlan(parsed, maxReps);
+    const plan = normalizeAndValidatePlan(parsed, maxReps, payload && payload.reason);
     if (!plan) throw new Error('Groq API returned an invalid plan shape');
     return plan;
   } finally {
