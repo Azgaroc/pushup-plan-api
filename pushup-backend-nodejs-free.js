@@ -251,6 +251,20 @@ function buildPrompt(payload) {
   const dailyTotalCap = (reason === 'initial' || reason === 'was_hard')
     ? Math.round(maxReps * 2.0)
     : Math.round(maxReps * 3.6);
+  // BUGFIX : le prompt ne donnait auparavant qu'un PLAFOND (dailyTotalCap), jamais
+  // de plancher de référence. Résultat : un total journalier très timide (ex: 3
+  // séries pour à peine 22 répétitions avec un maximum déclaré de 40) respectait
+  // à la lettre toutes les règles ("entre 3 et 6 séries", "sous le plafond") sans
+  // jamais être signalé comme insuffisant — le modèle pouvait donc être
+  // arbitrairement prudent sans jamais violer une consigne explicite. On lui donne
+  // maintenant une fourchette de référence concrète pour un jour d'entraînement
+  // normal, dérivée de la même logique que l'algorithme de secours déterministe.
+  const baselineLow = (reason === 'initial') ? Math.round(maxReps * 1.3)
+    : (reason === 'was_hard') ? Math.round(maxReps * 1.1)
+    : Math.round(maxReps * 2.0);
+  const baselineHigh = (reason === 'initial') ? Math.round(maxReps * 1.7)
+    : (reason === 'was_hard') ? Math.round(maxReps * 1.5)
+    : Math.round(maxReps * 3.0);
 
   const system = `Tu es un coach sportif spécialisé dans les pompes. Tu génères des plans d'entraînement progressifs, sûrs et réalistes, adaptés aux performances réelles de l'utilisateur. Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou après, respectant exactement ce schéma :
 {"days":[{"date":"YYYY-MM-DD","sets":[nombre,nombre,...],"restSeconds":nombre,"note":"courte phrase d'encouragement ou conseil en français"}]}
@@ -261,6 +275,7 @@ Règles STRICTES à respecter, non négociables :
 - Aucune série ne doit dépasser ${perSetCap} répétitions (soit 70% du maximum de l'utilisateur). Une série proche du maximum absolu est dangereuse et interdite.
 - RÉPARTITION entre les séries d'une même journée : ne te contente jamais de maximiser les premières séries puis de "compléter" la dernière avec un petit reliquat pour atteindre le total (par exemple 10+10+10+2 est INTERDIT). La répartition doit suivre une courbe cohérente et progressive (par exemple une légère montée en charge puis une fin un peu plus légère, du type 8+9+8+7), où aucune série n'est inférieure à 60% de la plus grande série de la même journée.
 - Le total de répétitions sur une journée ne doit JAMAIS dépasser ${dailyTotalCap} répétitions.
+- VOLUME DE RÉFÉRENCE pour un jour d'entraînement normal (hors repos), compte tenu de la raison "${reason}" et du maximum de ${maxReps} de l'utilisateur : vise un total journalier entre environ ${baselineLow} et ${baselineHigh} répétitions, sauf signal contraire déjà couvert par les règles ci-dessous (séance difficile, jour sauté...). Un total nettement inférieur à cette fourchette (par exemple 3 séries totalisant à peine la moitié de ${baselineLow}) est trop timide et n'est pas un choix "prudent" acceptable en l'absence d'une raison spécifique de le justifier.
 - Si les séances récentes (14 derniers jours) ne montrent AUCUNE séance difficile et un bon taux de complétion (peu ou pas de jours sautés), AUGMENTE le volume total de façon régulière d'un plan à l'autre, en te rapprochant progressivement de ${dailyTotalCap} répétitions par jour : un plan qui reste identique ou presque d'une semaine à l'autre alors que tout se passe bien est un échec de progression, pas de la prudence.
 - Si l'utilisateur a sauté un entraînement récemment, réduis légèrement le volume du premier jour puis reprends une progression douce.
 - Si l'utilisateur a signalé qu'une séance récente était difficile (pauses supplémentaires nécessaires), réduis le volume de TOUS les jours de ce plan d'environ 15%, pas seulement le premier jour : c'est un signal que le calibrage actuel est trop dur, pas un incident isolé.
