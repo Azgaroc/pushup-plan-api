@@ -550,7 +550,7 @@ Génère le plan des 5 prochains jours en JSON uniquement, selon le schéma donn
 async function generatePlanWithGroq(payload) {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error('GROQ_API_KEY not configured');
-  const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+  const model = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
   const constraints = computeCoachConstraints(payload);
   const { system, user } = buildPrompt(payload, constraints);
 
