@@ -295,6 +295,7 @@ const COACH_NOTE_STAGNATION = 'Tu tiens ton rythme depuis un moment — on pouss
 const COACH_NOTE_REGRESSION = 'Le volume est légèrement réduit le temps de retrouver un rythme plus confortable.';
 const COACH_NOTE_FATIGUE_WATCH = "Petite prudence aujourd'hui : le volume progresse plus doucement le temps de confirmer ta forme.";
 const COACH_NOTE_FATIGUE_CONFIRMED = 'Le volume est réduit pour laisser passer un signal de fatigue récent.';
+const COACH_NOTE_NEEDS_RECOVERY = 'Ton corps a besoin de récupérer : le volume est réduit temporairement pour te permettre de reprendre dans de bonnes conditions.';
 const COACH_NOTE_WAS_HARD = 'Volume réduit après une séance difficile';
 const COACH_NOTE_WAS_EASY = "Séance jugée trop facile : le volume augmente nettement aujourd'hui.";
 const COACH_NOTE_SKIPPED_DAY = 'Volume réduit après jour sauté';
@@ -306,7 +307,8 @@ const COACH_STATE_NOTE_BY_STATE = {
   STAGNATION: COACH_NOTE_STAGNATION,
   REGRESSION: COACH_NOTE_REGRESSION,
   FATIGUE_RISK_watch: COACH_NOTE_FATIGUE_WATCH,
-  FATIGUE_RISK_confirmed: COACH_NOTE_FATIGUE_CONFIRMED
+  FATIGUE_RISK_confirmed: COACH_NOTE_FATIGUE_CONFIRMED,
+  NEEDS_RECOVERY: COACH_NOTE_NEEDS_RECOVERY
 };
 
 const FORCED_REST_NOTE_STREAK = 'Repos imposé : tu enchaînes les séances sans coupure depuis plusieurs jours.';
