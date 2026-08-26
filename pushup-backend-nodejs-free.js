@@ -274,6 +274,107 @@ function computeCoachConstraints(payload) {
   return { maxReps, reason, today, referenceDateIso, ratio, classification, lastPlanWorkout, daysSinceLastPlanWorkout, perSetCap, dailyTotalCap, forcedRestDayIndex };
 }
 
+// ---------- Coach V2 : notes utilisateur (source de vérité unique, texte only) ----------
+// Ce bloc ne décide RIEN : il choisit uniquement le TEXTE qui accompagne une
+// décision déjà prise ailleurs (computeCoachConstraints/classifyCoachState/
+// computeForcedRestDayIndex/normalizeAndValidatePlanV2). Aucune fonction ici
+// ne modifie sets, restSeconds, ratio, forcedRestDayIndex, ni la
+// classification. Utilisé par makeRuleBasedPlan() ET normalizeAndValidatePlanV2()
+// (chemin Groq) : source unique, pour que rule-based et LLM affichent
+// exactement le même texte pour la même situation, et pour que le LLM ne
+// puisse plus jamais imposer sa propre formulation (voir resolveTrainingDayNote).
+//
+// Champs Coach V2 volontairement JAMAIS inclus dans un texte utilisateur :
+// volumeTrend, difficultyTrend, intraSessionDropoff, seuils numériques,
+// confidence, reasons[] bruts, noms techniques des états (FATIGUE_RISK,
+// NEEDS_RECOVERY...).
+
+const COACH_NOTE_PROGRESSING = 'Tu progresses bien, le volume augmente légèrement pour suivre ton rythme.';
+const COACH_NOTE_STABLE = 'Rythme stable, on garde le même volume pour consolider tes acquis.';
+const COACH_NOTE_STAGNATION = 'Tu tiens ton rythme depuis un moment — on pousse un peu le volume pour relancer la progression.';
+const COACH_NOTE_REGRESSION = 'Le volume est légèrement réduit le temps de retrouver un rythme plus confortable.';
+const COACH_NOTE_FATIGUE_WATCH = "Petite prudence aujourd'hui : le volume progresse plus doucement le temps de confirmer ta forme.";
+const COACH_NOTE_FATIGUE_CONFIRMED = 'Le volume est réduit pour laisser passer un signal de fatigue récent.';
+const COACH_NOTE_WAS_HARD = 'Volume réduit après une séance difficile';
+const COACH_NOTE_WAS_EASY = "Séance jugée trop facile : le volume augmente nettement aujourd'hui.";
+const COACH_NOTE_SKIPPED_DAY = 'Volume réduit après jour sauté';
+const COACH_NOTE_DEFAULT = 'Adaptation progressive'; // filet de sécurité si classification indisponible (ne devrait pas arriver en pratique)
+
+const COACH_STATE_NOTE_BY_STATE = {
+  PROGRESSING: COACH_NOTE_PROGRESSING,
+  STABLE: COACH_NOTE_STABLE,
+  STAGNATION: COACH_NOTE_STAGNATION,
+  REGRESSION: COACH_NOTE_REGRESSION,
+  FATIGUE_RISK_watch: COACH_NOTE_FATIGUE_WATCH,
+  FATIGUE_RISK_confirmed: COACH_NOTE_FATIGUE_CONFIRMED
+};
+
+const FORCED_REST_NOTE_STREAK = 'Repos imposé : tu enchaînes les séances sans coupure depuis plusieurs jours.';
+const FORCED_REST_NOTE_HARD_SESSIONS = 'Repos imposé : plusieurs séances récentes ont été signalées difficiles.';
+
+// Note pour un jour d'entraînement normal (ni repos forcé, ni récupération).
+// Priorité déterministe, documentée : un signal EXPLICITE et IMMÉDIAT de
+// l'utilisateur (was_hard/was_easy/skipped_day) prime toujours sur la
+// tendance de fond Coach V2 -- c'est une réaction à une action précise, pas
+// une lecture de tendance. À défaut, la classification Coach V2 explique la
+// tendance de fond. En dernier recours (classification indisponible), texte
+// neutre inchangé depuis toujours.
+function resolveTrainingDayNote(reason, classification) {
+  if (reason === 'was_hard') return COACH_NOTE_WAS_HARD;
+  if (reason === 'was_easy') return COACH_NOTE_WAS_EASY;
+  if (reason === 'skipped_day') return COACH_NOTE_SKIPPED_DAY;
+  const state = classification && classification.state;
+  if (state) {
+    const key = state === 'FATIGUE_RISK' ? `FATIGUE_RISK_${classification.severity}` : state;
+    const note = COACH_STATE_NOTE_BY_STATE[key];
+    if (note) return note;
+  }
+  return COACH_NOTE_DEFAULT;
+}
+
+// Dérive, EN LECTURE SEULE, les mêmes signaux bruts que
+// computeForcedRestDayIndex() (recentHardCount/trainingDaysPerWeek/
+// consecutiveStreak), uniquement pour choisir le TEXTE du repos forcé --
+// jamais pour décider s'il y a repos ou non (ça reste exclusivement le rôle
+// de computeForcedRestDayIndex(), non modifié). Volontairement indépendant
+// de computeCoachConstraints() pour ne rien changer à sa signature.
+function deriveForcedRestSignals(payload, classification) {
+  const context = (payload && payload.context) || {};
+  const profile = context.profile || {};
+  return {
+    recentHardCount: Array.isArray(context.recentHard) ? context.recentHard.length : 0,
+    trainingDaysPerWeek: Array.isArray(profile.days) ? profile.days.length : 0,
+    consecutiveStreak: computeConsecutiveTrainingStreak(context),
+    classification
+  };
+}
+
+// Cause affichée du repos forcé. Priorité IDENTIQUE à celle de
+// computeForcedRestDayIndex() (du signal le plus fort au plus doux), pour
+// que le texte corresponde toujours exactement à la branche qui a
+// effectivement déclenché le repos :
+//   1) plusieurs séances récentes signalées difficiles (recentHardCount>=2)
+//   2) une séance difficile + rythme déjà soutenu (recentHardCount>=1 et
+//      >=5 jours d'entraînement/semaine)
+//   3) enchaînement sans coupure (consecutiveStreak>=6)
+//   4) repos déclenché uniquement par l'analyse historique (NEEDS_RECOVERY),
+//      sans qu'aucun des 3 signaux ci-dessus ne soit présent : rattaché par
+//      défaut à la cause "séances difficiles" (c'est un signal de fatigue
+//      détecté par le moteur, sémantiquement plus proche de cette catégorie
+//      que d'un simple enchaînement de jours) -- choix de formulation
+//      documenté ici, sans incidence sur la décision de repos elle-même.
+function computeForcedRestCause({ recentHardCount, trainingDaysPerWeek, consecutiveStreak, classification }) {
+  if (recentHardCount >= 2) return 'hard_sessions';
+  if (recentHardCount >= 1 && trainingDaysPerWeek >= 5) return 'hard_sessions';
+  if (consecutiveStreak >= 6) return 'no_break_streak';
+  if (classification && classification.forcedRest) return 'hard_sessions';
+  return 'no_break_streak';
+}
+
+function forcedRestNoteFor(cause) {
+  return cause === 'no_break_streak' ? FORCED_REST_NOTE_STREAK : FORCED_REST_NOTE_HARD_SESSIONS;
+}
+
 function makeRuleBasedPlan(payload) {
   const constraints = computeCoachConstraints(payload);
   const { maxReps, reason, today, ratio, classification, lastPlanWorkout, daysSinceLastPlanWorkout, perSetCap, dailyTotalCap, forcedRestDayIndex } = constraints;
@@ -286,7 +387,7 @@ function makeRuleBasedPlan(payload) {
         date: d.toISOString().slice(0, 10),
         sets: [],
         restSeconds: 0,
-        note: 'Jour de repos imposé par ton coach : rythme soutenu et signes de fatigue récents.'
+        note: forcedRestNoteFor(computeForcedRestCause(deriveForcedRestSignals(payload, classification)))
       });
       continue;
     }
@@ -311,10 +412,7 @@ function makeRuleBasedPlan(payload) {
       date: d.toISOString().slice(0, 10),
       sets,
       restSeconds: isRecoveryDay ? RECOVERY_SESSION_REST_SECONDS : (sets.length >= 6 ? 75 : sets.length >= 5 ? 60 : 90),
-      note: isRecoveryDay ? RECOVERY_SESSION_NOTE
-        : reason === 'skipped_day' && i === 0 ? 'Volume réduit après jour sauté'
-        : reason === 'was_hard' ? 'Volume réduit après une séance difficile'
-        : 'Adaptation progressive'
+      note: isRecoveryDay ? RECOVERY_SESSION_NOTE : resolveTrainingDayNote(reason, classification)
     });
   }
   return { version: 1, generatedAt: new Date().toISOString(), days: rows, source: 'rule-based' };
@@ -360,15 +458,16 @@ function fixUnevenDistribution(sets, perSetCap) {
   return redistributeEvenly(sets, perSetCap);
 }
 
-const FORCED_REST_NOTE = 'Jour de repos imposé par ton coach : rythme soutenu et signes de fatigue récents.';
-
 // Dernière barrière de sécurité pour le chemin LLM : `constraints` (calculée
 // une seule fois par computeCoachConstraints(), même source de vérité que
 // makeRuleBasedPlan()) a la priorité absolue sur tout ce que Groq a proposé.
 // Groq peut choisir la répartition des séries à l'intérieur des contraintes,
 // mais ne décide jamais : l'état Coach, le volume max/min, le repos
 // obligatoire, la récupération, la continuité, perSetCap ou dailyTotalCap.
-function normalizeAndValidatePlanV2(raw, constraints) {
+// Il ne décide plus non plus du TEXTE de la note (voir resolveTrainingDayNote()
+// / forcedRestNoteFor() plus haut) : sa propre note est toujours ignorée et
+// remplacée par le texte déterministe correspondant à la décision Coach V2.
+function normalizeAndValidatePlanV2(raw, constraints, payload) {
   const { maxReps, ratio, perSetCap, dailyTotalCap, forcedRestDayIndex, classification, lastPlanWorkout, daysSinceLastPlanWorkout, today, reason } = constraints;
   if (!raw || !Array.isArray(raw.days)) return null;
 
@@ -398,23 +497,30 @@ function normalizeAndValidatePlanV2(raw, constraints) {
   // 2. Reconstruit EXACTEMENT 5 jours consécutifs à partir de `today`. Toute
   //    date manquante, dupliquée ou de forme invalide est reconstruite par le
   //    générateur déterministe -- jamais laissée vide ou absente. Les jours
-  //    valides proposés par Groq sont conservés tels quels.
+  //    valides proposés par Groq sont conservés tels quels pour sets/restSeconds.
+  //    La note proposée par Groq (fromGroq.note), elle, n'est JAMAIS utilisée :
+  //    la note finale est toujours imposée par le backend à partir de
+  //    reason/classification (voir resolveTrainingDayNote() plus haut).
+  const trainingDayNote = resolveTrainingDayNote(reason, classification);
   const days = [];
   for (let i = 0; i < 5; i++) {
     const d = new Date(today); d.setDate(d.getDate() + i);
     const iso = d.toISOString().slice(0, 10);
     const fromGroq = parsedByDate.get(iso);
-    days.push(fromGroq || { date: iso, sets: buildNormalTrainingDaySets(maxReps, i, ratio, perSetCap, dailyTotalCap, reason), restSeconds: 60, note: 'Adaptation progressive' });
+    days.push(fromGroq
+      ? { date: fromGroq.date, sets: fromGroq.sets, restSeconds: fromGroq.restSeconds, note: trainingDayNote }
+      : { date: iso, sets: buildNormalTrainingDaySets(maxReps, i, ratio, perSetCap, dailyTotalCap, reason), restSeconds: 60, note: trainingDayNote });
   }
 
   // 3. Force le jour de repos obligatoire (écrase tout ce que Groq y avait mis),
   //    et neutralise tout repos NON autorisé que Groq aurait inventé ailleurs
   //    (remplacé par un jour d'entraînement déterministe, jamais laissé vide).
+  const forcedRestNote = forcedRestNoteFor(computeForcedRestCause(deriveForcedRestSignals(payload, classification)));
   for (let i = 0; i < 5; i++) {
     if (i === forcedRestDayIndex) {
-      days[i] = { date: days[i].date, sets: [], restSeconds: 0, note: FORCED_REST_NOTE };
+      days[i] = { date: days[i].date, sets: [], restSeconds: 0, note: forcedRestNote };
     } else if (days[i].sets.length === 0) {
-      days[i] = { date: days[i].date, sets: buildNormalTrainingDaySets(maxReps, i, ratio, perSetCap, dailyTotalCap, reason), restSeconds: 60, note: 'Adaptation progressive' };
+      days[i] = { date: days[i].date, sets: buildNormalTrainingDaySets(maxReps, i, ratio, perSetCap, dailyTotalCap, reason), restSeconds: 60, note: trainingDayNote };
     }
   }
 
@@ -582,7 +688,7 @@ async function generatePlanWithGroq(payload) {
     const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
     if (!content) throw new Error('Groq API returned no content');
     const parsed = JSON.parse(content);
-    const plan = normalizeAndValidatePlanV2(parsed, constraints);
+    const plan = normalizeAndValidatePlanV2(parsed, constraints, payload);
     if (!plan) throw new Error('Groq API returned an invalid plan shape');
     return plan;
   } finally {
